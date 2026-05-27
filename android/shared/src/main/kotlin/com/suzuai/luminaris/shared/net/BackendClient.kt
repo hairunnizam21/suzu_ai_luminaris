@@ -141,6 +141,17 @@ class BackendClient(
             get("/v1/sessions/$sessionId/events?since=$since&timeout=$timeoutSec")
         }
 
+    /** Stop a running agent task so the user can send a new message. */
+    suspend fun stopSession(sessionId: String) = withContext(Dispatchers.IO) {
+        val empty = "".toRequestBody(JSON)
+        val resp = client.newCall(req("/v1/sessions/$sessionId/stop").post(empty).build()).execute()
+        resp.use {
+            if (!it.isSuccessful) {
+                throw BackendException(it.code, it.body?.string().orEmpty())
+            }
+        }
+    }
+
     /** Resume an errored session without sending a new user message — the
      *  agent picks up from the existing history. Used after a transient
      *  upstream provider failure. */
