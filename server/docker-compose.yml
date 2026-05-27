@@ -1,0 +1,12 @@
+services:
+  luminaris:
+    build: .
+    ports:
+      - "8765:8765"
+    env_file: .env
+    volumes:
+      - ./workspace:/app/workspace
+      - ./apk_artifacts:/app/apk_artifacts
+      - ./logs:/app/logs
+      - ./sessions.db:/app/sessions.db
+    restart: unless-stopped

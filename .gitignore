@@ -1,0 +1,44 @@
+# Android
+android/.gradle/
+android/build/
+android/*/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/captures/
+android/.externalNativeBuild/
+android/.cxx/
+
+# Kotlin / Java
+*.class
+hs_err_pid*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+.python-version
+
+# Server runtime artifacts
+server/.env
+server/sessions.db
+server/workspace/
+server/logs/
+server/apk_artifacts/
+
+# Editors / OS
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*~
+
+# Secrets / keys (defensive)
+**/secrets.local.*
+**/*.keystore
+**/*.jks
