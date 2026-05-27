@@ -110,6 +110,37 @@ async def _web_get(ctx: ToolContext, args: dict[str, Any]) -> str:
     return _truncate(await webtool.fetch(url))
 
 
+async def _read_attachment(ctx: ToolContext, args: dict[str, Any]) -> str:
+    """Read a file the user uploaded for this session.
+
+    Lives on the backend's local filesystem (not the SSH host).  We try
+    UTF-8 first; if that fails, return mime + size + the first 256 bytes
+    rendered as hex so the agent can at least sniff the format.
+    """
+    from .. import db_handle  # noqa: PLC0415 — late import to avoid cycle
+
+    aid = args.get("id") or args.get("attachment_id") or ""
+    if not aid:
+        return "error: missing 'id'"
+    att = await db_handle.get().get_attachment(aid)
+    if att is None or att.session_id != ctx.session_id:
+        return f"error: attachment {aid!r} not found in this session"
+    try:
+        with open(att.path, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        return f"error: cannot read attachment file: {e}"
+    head = f"[attachment {att.name} \u00b7 {att.mime} \u00b7 {att.size}B]\n"
+    try:
+        return _truncate(head + raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        sample = raw[:256].hex()
+        return _truncate(
+            f"{head}(binary file, not UTF-8)\nhead_hex={sample}\n"
+            "Use the shell tool to inspect via `file`/`unzip -l`/`xxd` etc."
+        )
+
+
 SPECS: list[ToolSpec] = [
     ToolSpec(
         name="shell",
@@ -201,6 +232,21 @@ SPECS: list[ToolSpec] = [
             "required": ["url"],
         },
         run=_web_get,
+    ),
+    ToolSpec(
+        name="read_attachment",
+        description=(
+            "Read a file the user uploaded with the chat message. Use this when "
+            "the user attaches a log, source file, JSON, image, or APK and asks "
+            "you to analyse it. Returns text directly when UTF-8, or metadata + "
+            "hex prefix when binary (then you can use the shell tool to dig further)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"id": {"type": "string", "description": "Attachment id"}},
+            "required": ["id"],
+        },
+        run=_read_attachment,
     ),
 ]
 

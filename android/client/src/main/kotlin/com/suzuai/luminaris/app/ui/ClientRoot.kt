@@ -25,6 +25,7 @@ import com.suzuai.luminaris.app.ClientApp
 import com.suzuai.luminaris.app.ui.ask.AskScreen
 import com.suzuai.luminaris.app.ui.automations.AutomationsScreen
 import com.suzuai.luminaris.app.ui.review.ReviewScreen
+import com.suzuai.luminaris.app.ui.sessions.AgentState
 import com.suzuai.luminaris.app.ui.sessions.SessionsScreen
 import com.suzuai.luminaris.app.ui.setup.ClientSetupScreen
 import com.suzuai.luminaris.app.ui.sidebar.ClientSidebar
@@ -37,12 +38,12 @@ import kotlinx.coroutines.launch
 @Composable
 fun ClientRoot() {
     val app = ClientApp.instance
-    val (url, token) = app.store.pair.collectAsState(initial = "" to "").value
+    val (url, _token) = app.store.pair.collectAsState(initial = "" to "").value
 
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
-    val configured = url.isNotBlank() && token.isNotBlank()
+    val configured = url.isNotBlank()
     var tab by remember(configured) { mutableStateOf(if (configured) ClientTab.Sessions else ClientTab.Setup) }
 
     LaunchedEffect(configured) {
@@ -61,6 +62,7 @@ fun ClientRoot() {
                 ClientSidebar(
                     current = tab,
                     canShowMain = configured,
+                    agentStatus = AgentState.status,
                     onPick = {
                         tab = it
                         scope.launch { drawerState.close() }

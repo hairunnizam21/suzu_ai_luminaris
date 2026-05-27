@@ -46,7 +46,12 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
-from . import agent, backup, providers
+import mimetypes
+import uuid
+from pathlib import Path
+import time
+
+from . import agent, backup, db_handle, providers
 from .auth import require_token
 from .config import settings
 from .db import Db
@@ -54,8 +59,10 @@ from .logbus import LogBus
 from .schemas import (
     AdminConfig,
     ApkArtifact,
+    Attachment,
     ChatMessage,
     ChatRequest,
+    EventsResponse,
     HealthResponse,
     ReadyResponse,
     Session,
@@ -65,10 +72,27 @@ from .schemas import (
 from .ssh import SshError
 from .tools import apk as apk_tool
 
+
+async def require_ready() -> None:
+    """Client-facing gate: only blocks if the panel hasn't saved a config yet.
+
+    Once the panel writes a complete AdminConfig, every Client APK on the same
+    LAN that knows the URL can chat — by design. The admin endpoints stay
+    bearer-token-gated.
+    """
+    cfg = await db.get_config()
+    if not cfg.ai_provider.api_key or not cfg.ai_provider.model or not cfg.ssh.host:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "backend not configured — ask the Panel app operator to fill SSH + AI provider config first",
+        )
+
 VERSION = "0.1.0"
 
 db = Db()
+db_handle.register(db)
 logbus = LogBus(settings.log_file)
+settings.attachments_root.mkdir(parents=True, exist_ok=True)
 
 
 @asynccontextmanager
@@ -97,8 +121,9 @@ async def health() -> HealthResponse:
     return HealthResponse(status="ok", version=VERSION)
 
 
-@app.get("/v1/ready", response_model=ReadyResponse, dependencies=[Depends(require_token)])
+@app.get("/v1/ready", response_model=ReadyResponse)
 async def ready() -> ReadyResponse:
+    """Public — clients only need to know if the panel finished configuring."""
     cfg = await db.get_config()
     missing: list[str] = []
     if not cfg.ssh.host:
@@ -233,18 +258,18 @@ async def import_backup(file: UploadFile = File(...)) -> dict[str, Any]:
 
 # -------- sessions ----------------------------------------------------
 
-@app.get("/v1/sessions", response_model=list[Session], dependencies=[Depends(require_token)])
+@app.get("/v1/sessions", response_model=list[Session], dependencies=[Depends(require_ready)])
 async def list_sessions() -> list[Session]:
     return await db.list_sessions()
 
 
-@app.post("/v1/sessions", response_model=Session, dependencies=[Depends(require_token)])
+@app.post("/v1/sessions", response_model=Session, dependencies=[Depends(require_ready)])
 async def create_session(payload: dict[str, Any]) -> Session:
     title = (payload.get("title") or "Untitled").strip() or "Untitled"
     return await db.create_session(title)
 
 
-@app.delete("/v1/sessions/{sid}", dependencies=[Depends(require_token)])
+@app.delete("/v1/sessions/{sid}", dependencies=[Depends(require_ready)])
 async def delete_session(sid: str) -> dict[str, str]:
     await db.delete_session(sid)
     return {"deleted": sid}
@@ -253,35 +278,208 @@ async def delete_session(sid: str) -> dict[str, str]:
 @app.get(
     "/v1/sessions/{sid}/messages",
     response_model=list[ChatMessage],
-    dependencies=[Depends(require_token)],
+    dependencies=[Depends(require_ready)],
 )
 async def list_messages(sid: str) -> list[ChatMessage]:
     return await db.list_messages(sid)
 
 
-# -------- chat (SSE) --------------------------------------------------
+# -------- attachments -------------------------------------------------
 
-@app.post("/v1/chat", dependencies=[Depends(require_token)])
-async def chat(req: ChatRequest) -> StreamingResponse:
+_MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024  # 50 MB per file is plenty for APK/log/image
+
+
+def _safe_name(name: str) -> str:
+    name = name.strip().replace("\\", "/").rsplit("/", 1)[-1] or "file"
+    out = "".join(c if (c.isalnum() or c in "._-") else "_" for c in name)
+    return out[:120] or "file"
+
+
+@app.post(
+    "/v1/sessions/{sid}/attachments",
+    response_model=Attachment,
+    dependencies=[Depends(require_ready)],
+)
+async def upload_attachment(
+    sid: str,
+    file: UploadFile = File(...),
+) -> Attachment:
+    sess = await db.get_session(sid)
+    if sess is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown session")
+    data = await file.read()
+    if len(data) > _MAX_ATTACHMENT_BYTES:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            f"file too large (max {_MAX_ATTACHMENT_BYTES} bytes)",
+        )
+    aid = uuid.uuid4().hex[:16]
+    name = _safe_name(file.filename or "file")
+    sess_dir: Path = settings.attachments_root / sid
+    sess_dir.mkdir(parents=True, exist_ok=True)
+    target = sess_dir / f"{aid}__{name}"
+    target.write_bytes(data)
+    mime = file.content_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
+    att = Attachment(
+        id=aid,
+        session_id=sid,
+        name=name,
+        mime=mime,
+        size=len(data),
+        path=str(target),
+        created_at=time.time(),
+    )
+    await db.add_attachment(att)
+    await logbus.emit(
+        "INFO",
+        "attachments",
+        f"uploaded {name} ({len(data)}B, {mime}) to session {sid} as {aid}",
+    )
+    # Mask absolute path before returning to the client.
+    return att.model_copy(update={"path": ""})
+
+
+@app.get(
+    "/v1/sessions/{sid}/attachments",
+    response_model=list[Attachment],
+    dependencies=[Depends(require_ready)],
+)
+async def list_session_attachments(sid: str) -> list[Attachment]:
+    items = await db.list_attachments(sid)
+    return [a.model_copy(update={"path": ""}) for a in items]
+
+
+@app.get("/v1/attachments/{aid}", dependencies=[Depends(require_ready)])
+async def download_attachment(aid: str) -> FileResponse:
+    att = await db.get_attachment(aid)
+    if att is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown attachment")
+    p = Path(att.path)
+    if not p.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "attachment file missing on server")
+    return FileResponse(p, media_type=att.mime, filename=att.name)
+
+
+# -------- chat (background + event polling) ----------------------------
+
+@app.post("/v1/chat", dependencies=[Depends(require_ready)])
+async def chat(req: ChatRequest) -> dict[str, Any]:
+    """Kicks off the agent loop as a background task and returns immediately.
+
+    The client should then long-poll `/v1/sessions/{id}/events?since=<seq>`
+    for incremental updates. This survives the client closing the APK —
+    the agent keeps running and persisting events.
+    """
     cfg = await db.get_config()
     if not cfg.ai_provider.api_key or not cfg.ai_provider.model:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "ai provider not configured")
     if not cfg.ssh.host:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "ssh not configured")
+    if agent.is_running(req.session_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "session already has a running agent — wait for it to finish",
+        )
+    sess = await db.get_session(req.session_id)
+    if sess is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown session")
+    try:
+        await agent.start(
+            db=db,
+            cfg=cfg,
+            logbus=logbus,
+            session_id=req.session_id,
+            user_message=req.content,
+            max_iterations=req.max_iterations,
+            attachment_ids=req.attachment_ids,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
+    return {"started": True, "session_id": req.session_id}
 
-    async def gen():
+
+@app.post("/v1/sessions/{sid}/resume", dependencies=[Depends(require_ready)])
+async def resume_session(sid: str) -> dict[str, Any]:
+    """Resume an errored session — continue the agent loop from the existing
+    history without appending a new user turn. Used by the client's "Resume"
+    button after a transient upstream provider failure.
+    """
+    cfg = await db.get_config()
+    if not cfg.ai_provider.api_key or not cfg.ai_provider.model:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "ai provider not configured")
+    if not cfg.ssh.host:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "ssh not configured")
+    if agent.is_running(sid):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "session already has a running agent",
+        )
+    sess = await db.get_session(sid)
+    if sess is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown session")
+    try:
+        await agent.start(
+            db=db,
+            cfg=cfg,
+            logbus=logbus,
+            session_id=sid,
+            user_message="",
+            resume=True,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
+    return {"resumed": True, "session_id": sid}
+
+
+@app.get(
+    "/v1/sessions/{sid}/events",
+    response_model=EventsResponse,
+    dependencies=[Depends(require_ready)],
+)
+async def session_events(
+    sid: str,
+    since: int = 0,
+    timeout: float = 25.0,
+    request: Request = None,  # type: ignore[assignment]
+) -> EventsResponse:
+    """Long-poll for agent events with seq > since.
+
+    Returns immediately if there are already pending events, otherwise
+    waits up to `timeout` seconds for the next notify from the agent
+    loop. Capped at 25s by default to play nice with mobile data savers.
+    """
+    sess = await db.get_session(sid)
+    if sess is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown session")
+
+    events = await db.list_events(sid, since)
+    if not events:
+        ev = agent.bus.get(sid)
         try:
-            async for frame in agent.chat_stream(
-                db=db,
-                cfg=cfg,
-                logbus=logbus,
-                session_id=req.session_id,
-                user_message=req.content,
-                max_iterations=req.max_iterations,
-            ):
-                yield frame
-        except Exception as e:  # noqa: BLE001
-            await logbus.emit("ERROR", "chat", repr(e))
-            yield agent.StreamWire.frame("error", message=repr(e))
+            await asyncio.wait_for(ev.wait(), timeout=max(1.0, min(timeout, 60.0)))
+        except asyncio.TimeoutError:
+            pass
+        # Re-check whether the client gave up while we were waiting.
+        if request is not None and await request.is_disconnected():
+            return EventsResponse(
+                session_id=sid,
+                status=sess.status,
+                tokens_in=sess.tokens_in,
+                tokens_out=sess.tokens_out,
+                events=[],
+                last_seq=since,
+                running=agent.is_running(sid),
+            )
+        events = await db.list_events(sid, since)
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    sess = await db.get_session(sid)
+    last_seq = events[-1].seq if events else since
+    return EventsResponse(
+        session_id=sid,
+        status=sess.status if sess else "idle",
+        tokens_in=sess.tokens_in if sess else 0,
+        tokens_out=sess.tokens_out if sess else 0,
+        events=events,
+        last_seq=last_seq,
+        running=agent.is_running(sid),
+    )

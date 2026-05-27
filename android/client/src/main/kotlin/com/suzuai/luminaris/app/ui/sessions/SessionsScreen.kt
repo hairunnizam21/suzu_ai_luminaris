@@ -31,6 +31,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -66,6 +67,15 @@ object ActiveSession {
     var title: String? = null
 }
 
+/** Process-scoped agent status broadcast so the sidebar avatar can mirror
+ *  whatever the Ask screen is showing. Backed by Compose snapshot state so
+ *  any composable that reads it re-composes automatically. */
+object AgentState {
+    var status by androidx.compose.runtime.mutableStateOf("idle")
+    var tokensIn by androidx.compose.runtime.mutableIntStateOf(0)
+    var tokensOut by androidx.compose.runtime.mutableIntStateOf(0)
+}
+
 @Composable
 fun SessionsScreen(onOpenAsk: () -> Unit) {
     val app = ClientApp.instance
@@ -87,8 +97,8 @@ fun SessionsScreen(onOpenAsk: () -> Unit) {
             .onFailure { error = "Load failed: ${it.message}" }
     }
 
-    LaunchedEffect(url, token) {
-        if (url.isBlank() || token.isBlank()) return@LaunchedEffect
+    LaunchedEffect(url) {
+        if (url.isBlank()) return@LaunchedEffect
         loading = true
         refresh()
         loading = false

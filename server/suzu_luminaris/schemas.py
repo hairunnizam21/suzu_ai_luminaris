@@ -71,6 +71,10 @@ class Session(BaseModel):
     title: str
     created_at: float
     updated_at: float
+    status: str = "idle"  # idle | typing | tool | done | error
+    tokens_in: int = 0
+    tokens_out: int = 0
+    last_event_seq: int = 0
 
 
 class ToolCall(BaseModel):
@@ -96,6 +100,57 @@ class ChatRequest(BaseModel):
     session_id: str
     content: str
     max_iterations: int | None = None
+    attachment_ids: list[str] = []
+
+
+class Attachment(BaseModel):
+    """A file uploaded by the user that the agent can read with `read_attachment`."""
+
+    id: str
+    session_id: str
+    name: str
+    mime: str
+    size: int
+    path: str = ""  # server-local; not exposed in client list responses
+    created_at: float
+
+
+class TokenUsage(BaseModel):
+    """Token usage for a single LLM turn."""
+
+    prompt: int = 0
+    completion: int = 0
+    total: int = 0
+
+
+class AgentEvent(BaseModel):
+    """One row of the persisted agent_events stream.
+
+    `type` is one of: delta, tool_call, tool_result, done, error, usage,
+    status. Only the field for the current type is populated.
+    """
+
+    seq: int
+    ts: float
+    type: str
+    delta: str | None = None
+    tool_call: ToolCall | None = None
+    tool_result: ToolResult | None = None
+    usage: TokenUsage | None = None
+    status: str | None = None
+    message: str | None = None
+
+
+class EventsResponse(BaseModel):
+    """Long-poll response for /v1/sessions/{id}/events."""
+
+    session_id: str
+    status: str
+    tokens_in: int
+    tokens_out: int
+    events: list[AgentEvent]
+    last_seq: int
+    running: bool
 
 
 class StreamEvent(BaseModel):

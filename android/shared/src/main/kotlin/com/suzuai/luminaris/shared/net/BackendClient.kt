@@ -2,8 +2,10 @@ package com.suzuai.luminaris.shared.net
 
 import com.suzuai.luminaris.shared.data.AdminConfig
 import com.suzuai.luminaris.shared.data.ApkArtifact
+import com.suzuai.luminaris.shared.data.Attachment
 import com.suzuai.luminaris.shared.data.ChatMessage
 import com.suzuai.luminaris.shared.data.ChatRequest
+import com.suzuai.luminaris.shared.data.EventsResponse
 import com.suzuai.luminaris.shared.data.HealthResponse
 import com.suzuai.luminaris.shared.data.LogEvent
 import com.suzuai.luminaris.shared.data.ReadyResponse
@@ -21,6 +23,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -116,7 +119,64 @@ class BackendClient(
     /** Live log SSE for the panel. */
     fun streamLogs(): Flow<LogEvent> = sseFlow("/v1/admin/logs/stream") { json.decodeFromString<LogEvent>(it) }
 
-    /** Streaming chat for the client. */
+    /** Kick off chat as a server-side background task. Returns immediately;
+     *  the agent keeps running even if the client disconnects. Subsequent
+     *  updates flow through [pollEvents]. */
+    suspend fun startChat(request: ChatRequest) = withContext(Dispatchers.IO) {
+        val body = json.encodeToString(request).toRequestBody(JSON)
+        val resp = client.newCall(req("/v1/chat").post(body).build()).execute()
+        resp.use {
+            if (!it.isSuccessful) {
+                throw BackendException(it.code, it.body?.string().orEmpty())
+            }
+        }
+    }
+
+    /** Long-poll for new agent events. `since` is the last seen seq; the
+     *  server blocks up to ~25s waiting for a new event before responding. */
+    suspend fun pollEvents(sessionId: String, since: Int, timeoutSec: Int = 25): EventsResponse =
+        withContext(Dispatchers.IO) {
+            get("/v1/sessions/$sessionId/events?since=$since&timeout=$timeoutSec")
+        }
+
+    /** Resume an errored session without sending a new user message — the
+     *  agent picks up from the existing history. Used after a transient
+     *  upstream provider failure. */
+    suspend fun resumeSession(sessionId: String) = withContext(Dispatchers.IO) {
+        val empty = "".toRequestBody(JSON)
+        val resp = client.newCall(req("/v1/sessions/$sessionId/resume").post(empty).build()).execute()
+        resp.use {
+            if (!it.isSuccessful) {
+                throw BackendException(it.code, it.body?.string().orEmpty())
+            }
+        }
+    }
+
+    /** Upload an attachment (file/image/APK) for a chat session. */
+    suspend fun uploadAttachment(
+        sessionId: String,
+        bytes: ByteArray,
+        name: String,
+        mime: String,
+    ): Attachment = withContext(Dispatchers.IO) {
+        val body = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart(
+                "file",
+                name,
+                bytes.toRequestBody(mime.toMediaType()),
+            )
+            .build()
+        val request = req("/v1/sessions/$sessionId/attachments").post(body).build()
+        client.newCall(request).body<Attachment>()
+    }
+
+    /** List attachments uploaded for a session. */
+    suspend fun listAttachments(sessionId: String): List<Attachment> = withContext(Dispatchers.IO) {
+        get("/v1/sessions/$sessionId/attachments")
+    }
+
+    /** Streaming chat for the client (legacy; superseded by startChat + pollEvents). */
     fun streamChat(request: ChatRequest): Flow<StreamEvent> = flow {
         val body = json.encodeToString(request).toRequestBody(JSON)
         val sseReq = req("/v1/chat").post(body).header("Accept", "text/event-stream").build()

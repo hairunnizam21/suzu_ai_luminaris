@@ -19,6 +19,7 @@ class Settings(BaseModel):
     port: int = 8765
     workspace_root: Path
     apk_root: Path
+    attachments_root: Path
     log_file: Path
     default_max_iterations: int = 100
 
@@ -35,6 +36,7 @@ def load_settings() -> Settings:
         port=int(os.environ.get("SUZU_PORT", "8765")),
         workspace_root=_path(os.environ.get("SUZU_WORKSPACE_ROOT"), "./workspace"),
         apk_root=_path(os.environ.get("SUZU_APK_ROOT"), "./apk_artifacts"),
+        attachments_root=_path(os.environ.get("SUZU_ATTACHMENTS_ROOT"), "./attachments"),
         log_file=_path(os.environ.get("SUZU_LOG_FILE"), "./logs/suzu.log"),
         default_max_iterations=int(os.environ.get("SUZU_DEFAULT_MAX_ITERATIONS", "100")),
     )

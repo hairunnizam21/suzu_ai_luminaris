@@ -13,6 +13,7 @@ OpenAI-compatible gateways speak it; anthropic-native is mapped on the fly.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -21,9 +22,31 @@ import httpx
 
 from .schemas import AiProviderConfig
 
+# If the upstream goes silent for this long mid-stream we treat the request as
+# dead and surface a retryable error. fiqstr / OpenRouter / similar gateways
+# sometimes hang on heavy outputs without ever sending a closing chunk.
+_STREAM_IDLE_TIMEOUT_S = 60.0
+
 
 class ProviderError(RuntimeError):
     pass
+
+
+async def _iter_lines_with_idle_timeout(
+    resp: httpx.Response, idle_timeout: float
+) -> AsyncIterator[str]:
+    """Yield SSE lines, abort if no line arrives within `idle_timeout` s."""
+    it = resp.aiter_lines().__aiter__()
+    while True:
+        try:
+            line = await asyncio.wait_for(it.__anext__(), timeout=idle_timeout)
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError as e:
+            raise ProviderError(
+                f"upstream went silent for {idle_timeout:.0f}s (idle timeout)"
+            ) from e
+        yield line
 
 
 async def verify(cfg: AiProviderConfig) -> str:
@@ -86,6 +109,9 @@ async def _stream_openai(
         "messages": messages,
         "stream": True,
         "temperature": cfg.temperature,
+        # Most OpenAI-compatible gateways honour this and emit a final chunk
+        # with `usage` populated. Harmless for those that don't.
+        "stream_options": {"include_usage": True},
     }
     if cfg.max_tokens > 0:
         payload["max_tokens"] = cfg.max_tokens
@@ -112,7 +138,7 @@ async def _stream_openai(
                 raise ProviderError(f"HTTP {resp.status_code}: {body[:400].decode('utf-8', 'replace')}")
             # Accumulate tool call args across deltas keyed by index.
             tool_accum: dict[int, dict[str, str]] = {}
-            async for line in resp.aiter_lines():
+            async for line in _iter_lines_with_idle_timeout(resp, _STREAM_IDLE_TIMEOUT_S):
                 if not line or not line.startswith("data:"):
                     continue
                 raw = line[len("data:") :].strip()
@@ -131,6 +157,13 @@ async def _stream_openai(
                     obj = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
+                if (usage := obj.get("usage")) and isinstance(usage, dict):
+                    yield {
+                        "type": "usage",
+                        "prompt": int(usage.get("prompt_tokens") or 0),
+                        "completion": int(usage.get("completion_tokens") or 0),
+                        "total": int(usage.get("total_tokens") or 0),
+                    }
                 choices = obj.get("choices") or []
                 if not choices:
                     continue
@@ -200,7 +233,7 @@ async def _stream_anthropic(
                 body = await resp.aread()
                 raise ProviderError(f"HTTP {resp.status_code}: {body[:400].decode('utf-8', 'replace')}")
             tool_accum: dict[int, dict[str, str]] = {}
-            async for line in resp.aiter_lines():
+            async for line in _iter_lines_with_idle_timeout(resp, _STREAM_IDLE_TIMEOUT_S):
                 if not line or not line.startswith("data:"):
                     continue
                 raw = line[len("data:") :].strip()
@@ -209,7 +242,26 @@ async def _stream_anthropic(
                 except json.JSONDecodeError:
                     continue
                 t = obj.get("type")
-                if t == "content_block_delta":
+                if t == "message_start":
+                    mu = ((obj.get("message") or {}).get("usage") or {})
+                    if mu:
+                        yield {
+                            "type": "usage",
+                            "prompt": int(mu.get("input_tokens") or 0),
+                            "completion": int(mu.get("output_tokens") or 0),
+                            "total": int(mu.get("input_tokens") or 0)
+                            + int(mu.get("output_tokens") or 0),
+                        }
+                elif t == "message_delta":
+                    mu = obj.get("usage") or {}
+                    if mu:
+                        yield {
+                            "type": "usage",
+                            "prompt": 0,
+                            "completion": int(mu.get("output_tokens") or 0),
+                            "total": int(mu.get("output_tokens") or 0),
+                        }
+                elif t == "content_block_delta":
                     d = obj.get("delta") or {}
                     if d.get("type") == "text_delta" and (txt := d.get("text")):
                         yield {"type": "delta", "text": txt}
