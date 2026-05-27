@@ -1,7 +1,13 @@
 package com.suzuai.luminaris.app.ui.sidebar
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -10,6 +16,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.draw.scale
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AutoAwesome
@@ -49,6 +58,7 @@ enum class ClientTab(val label: String, val icon: ImageVector) {
 fun ClientSidebar(
     current: ClientTab,
     canShowMain: Boolean,
+    agentStatus: String = "idle",
     onPick: (ClientTab) -> Unit,
 ) {
     Column(Modifier.padding(top = 18.dp)) {
@@ -56,12 +66,7 @@ fun ClientSidebar(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(
-                Icons.Outlined.AutoAwesome,
-                contentDescription = null,
-                tint = LuminarisColors.AccentCyan,
-                modifier = Modifier.size(22.dp),
-            )
+            AvatarPulse(status = agentStatus)
             Spacer(Modifier.width(10.dp))
             Text(
                 "Luminaris",
@@ -70,8 +75,13 @@ fun ClientSidebar(
             )
         }
         Text(
-            "Devin-style agent",
-            color = LuminarisColors.Muted,
+            statusSubtitle(agentStatus),
+            color = when (agentStatus) {
+                "typing" -> LuminarisColors.AccentCyan
+                "tool" -> LuminarisColors.AccentAmber
+                "error" -> LuminarisColors.AccentRed
+                else -> LuminarisColors.Muted
+            },
             style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.padding(start = 18.dp, bottom = 12.dp),
         )
@@ -89,6 +99,57 @@ fun ClientSidebar(
             )
         }
     }
+}
+
+/**
+ * Pulsing avatar dot — gentle 'breathing' alpha when idle, brighter pulse
+ * when typing, amber when running a tool, red when erroring.
+ */
+@Composable
+private fun AvatarPulse(status: String) {
+    val color = when (status) {
+        "typing" -> LuminarisColors.AccentCyan
+        "tool" -> LuminarisColors.AccentAmber
+        "error" -> LuminarisColors.AccentRed
+        else -> LuminarisColors.AccentCyanDim
+    }
+    val transition = rememberInfiniteTransition(label = "avatarPulse")
+    val active = status == "typing" || status == "tool"
+    val scale by transition.animateFloat(
+        initialValue = if (active) 0.9f else 0.95f,
+        targetValue = if (active) 1.1f else 1.02f,
+        animationSpec = infiniteRepeatable(
+            tween(if (active) 600 else 1800),
+            RepeatMode.Reverse,
+        ),
+        label = "avatarScale",
+    )
+    Box(
+        modifier = Modifier
+            .size(22.dp)
+            .scale(scale),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .size(22.dp)
+                .clip(CircleShape)
+                .background(color.copy(alpha = 0.18f)),
+        )
+        Icon(
+            Icons.Outlined.AutoAwesome,
+            contentDescription = null,
+            tint = color,
+            modifier = Modifier.size(16.dp),
+        )
+    }
+}
+
+private fun statusSubtitle(status: String): String = when (status) {
+    "typing" -> "Thinking…"
+    "tool" -> "Running a tool…"
+    "error" -> "Agent hit an error"
+    else -> "Devin-style agent"
 }
 
 @Composable

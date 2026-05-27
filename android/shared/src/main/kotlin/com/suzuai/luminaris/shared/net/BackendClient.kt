@@ -4,6 +4,7 @@ import com.suzuai.luminaris.shared.data.AdminConfig
 import com.suzuai.luminaris.shared.data.ApkArtifact
 import com.suzuai.luminaris.shared.data.ChatMessage
 import com.suzuai.luminaris.shared.data.ChatRequest
+import com.suzuai.luminaris.shared.data.EventsResponse
 import com.suzuai.luminaris.shared.data.HealthResponse
 import com.suzuai.luminaris.shared.data.LogEvent
 import com.suzuai.luminaris.shared.data.ReadyResponse
@@ -116,7 +117,21 @@ class BackendClient(
     /** Live log SSE for the panel. */
     fun streamLogs(): Flow<LogEvent> = sseFlow("/v1/admin/logs/stream") { json.decodeFromString<LogEvent>(it) }
 
-    /** Streaming chat for the client. */
+    /** Kick off chat as a server-side background task. Returns immediately;
+     *  the agent keeps running even if the client disconnects. Subsequent
+     *  updates flow through [pollEvents]. */
+    suspend fun startChat(request: ChatRequest): Map<String, Boolean> = withContext(Dispatchers.IO) {
+        post("/v1/chat", request)
+    }
+
+    /** Long-poll for new agent events. `since` is the last seen seq; the
+     *  server blocks up to ~25s waiting for a new event before responding. */
+    suspend fun pollEvents(sessionId: String, since: Int, timeoutSec: Int = 25): EventsResponse =
+        withContext(Dispatchers.IO) {
+            get("/v1/sessions/$sessionId/events?since=$since&timeout=$timeoutSec")
+        }
+
+    /** Streaming chat for the client (legacy; superseded by startChat + pollEvents). */
     fun streamChat(request: ChatRequest): Flow<StreamEvent> = flow {
         val body = json.encodeToString(request).toRequestBody(JSON)
         val sseReq = req("/v1/chat").post(body).header("Accept", "text/event-stream").build()

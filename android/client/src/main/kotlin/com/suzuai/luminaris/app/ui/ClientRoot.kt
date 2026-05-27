@@ -25,6 +25,7 @@ import com.suzuai.luminaris.app.ClientApp
 import com.suzuai.luminaris.app.ui.ask.AskScreen
 import com.suzuai.luminaris.app.ui.automations.AutomationsScreen
 import com.suzuai.luminaris.app.ui.review.ReviewScreen
+import com.suzuai.luminaris.app.ui.sessions.AgentState
 import com.suzuai.luminaris.app.ui.sessions.SessionsScreen
 import com.suzuai.luminaris.app.ui.setup.ClientSetupScreen
 import com.suzuai.luminaris.app.ui.sidebar.ClientSidebar
@@ -61,6 +62,7 @@ fun ClientRoot() {
                 ClientSidebar(
                     current = tab,
                     canShowMain = configured,
+                    agentStatus = AgentState.status,
                     onPick = {
                         tab = it
                         scope.launch { drawerState.close() }

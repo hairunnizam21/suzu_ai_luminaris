@@ -86,6 +86,10 @@ data class Session(
     val title: String,
     @SerialName("created_at") val createdAt: Double,
     @SerialName("updated_at") val updatedAt: Double,
+    val status: String = "idle", // idle | typing | tool | done | error
+    @SerialName("tokens_in") val tokensIn: Int = 0,
+    @SerialName("tokens_out") val tokensOut: Int = 0,
+    @SerialName("last_event_seq") val lastEventSeq: Int = 0,
 )
 
 @Serializable
@@ -125,4 +129,38 @@ data class StreamEvent(
     @SerialName("tool_call") val toolCall: ToolCall? = null,
     @SerialName("tool_result") val toolResult: ToolResult? = null,
     val message: String? = null, // for errors
+)
+
+/** Token usage for one LLM turn (and per-session totals). */
+@Serializable
+data class TokenUsage(
+    val prompt: Int = 0,
+    val completion: Int = 0,
+    val total: Int = 0,
+)
+
+/** Persisted agent event — mirrors backend `agent_events` rows. */
+@Serializable
+data class AgentEvent(
+    val seq: Int,
+    val ts: Double,
+    val type: String, // delta | tool_call | tool_result | usage | status | done | error
+    val delta: String? = null,
+    @SerialName("tool_call") val toolCall: ToolCall? = null,
+    @SerialName("tool_result") val toolResult: ToolResult? = null,
+    val usage: TokenUsage? = null,
+    val status: String? = null,
+    val message: String? = null,
+)
+
+/** Long-poll envelope from `GET /v1/sessions/{id}/events`. */
+@Serializable
+data class EventsResponse(
+    @SerialName("session_id") val sessionId: String,
+    val status: String,
+    @SerialName("tokens_in") val tokensIn: Int,
+    @SerialName("tokens_out") val tokensOut: Int,
+    val events: List<AgentEvent>,
+    @SerialName("last_seq") val lastSeq: Int,
+    val running: Boolean,
 )

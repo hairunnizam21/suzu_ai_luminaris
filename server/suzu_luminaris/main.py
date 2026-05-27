@@ -56,6 +56,7 @@ from .schemas import (
     ApkArtifact,
     ChatMessage,
     ChatRequest,
+    EventsResponse,
     HealthResponse,
     ReadyResponse,
     Session,
@@ -275,29 +276,92 @@ async def list_messages(sid: str) -> list[ChatMessage]:
     return await db.list_messages(sid)
 
 
-# -------- chat (SSE) --------------------------------------------------
+# -------- chat (background + event polling) ----------------------------
 
 @app.post("/v1/chat", dependencies=[Depends(require_ready)])
-async def chat(req: ChatRequest) -> StreamingResponse:
+async def chat(req: ChatRequest) -> dict[str, Any]:
+    """Kicks off the agent loop as a background task and returns immediately.
+
+    The client should then long-poll `/v1/sessions/{id}/events?since=<seq>`
+    for incremental updates. This survives the client closing the APK —
+    the agent keeps running and persisting events.
+    """
     cfg = await db.get_config()
     if not cfg.ai_provider.api_key or not cfg.ai_provider.model:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "ai provider not configured")
     if not cfg.ssh.host:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "ssh not configured")
+    if agent.is_running(req.session_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "session already has a running agent — wait for it to finish",
+        )
+    sess = await db.get_session(req.session_id)
+    if sess is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown session")
+    try:
+        await agent.start(
+            db=db,
+            cfg=cfg,
+            logbus=logbus,
+            session_id=req.session_id,
+            user_message=req.content,
+            max_iterations=req.max_iterations,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
+    return {"started": True, "session_id": req.session_id}
 
-    async def gen():
+
+@app.get(
+    "/v1/sessions/{sid}/events",
+    response_model=EventsResponse,
+    dependencies=[Depends(require_ready)],
+)
+async def session_events(
+    sid: str,
+    since: int = 0,
+    timeout: float = 25.0,
+    request: Request = None,  # type: ignore[assignment]
+) -> EventsResponse:
+    """Long-poll for agent events with seq > since.
+
+    Returns immediately if there are already pending events, otherwise
+    waits up to `timeout` seconds for the next notify from the agent
+    loop. Capped at 25s by default to play nice with mobile data savers.
+    """
+    sess = await db.get_session(sid)
+    if sess is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown session")
+
+    events = await db.list_events(sid, since)
+    if not events:
+        ev = agent.bus.get(sid)
         try:
-            async for frame in agent.chat_stream(
-                db=db,
-                cfg=cfg,
-                logbus=logbus,
-                session_id=req.session_id,
-                user_message=req.content,
-                max_iterations=req.max_iterations,
-            ):
-                yield frame
-        except Exception as e:  # noqa: BLE001
-            await logbus.emit("ERROR", "chat", repr(e))
-            yield agent.StreamWire.frame("error", message=repr(e))
+            await asyncio.wait_for(ev.wait(), timeout=max(1.0, min(timeout, 60.0)))
+        except asyncio.TimeoutError:
+            pass
+        # Re-check whether the client gave up while we were waiting.
+        if request is not None and await request.is_disconnected():
+            return EventsResponse(
+                session_id=sid,
+                status=sess.status,
+                tokens_in=sess.tokens_in,
+                tokens_out=sess.tokens_out,
+                events=[],
+                last_seq=since,
+                running=agent.is_running(sid),
+            )
+        events = await db.list_events(sid, since)
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    sess = await db.get_session(sid)
+    last_seq = events[-1].seq if events else since
+    return EventsResponse(
+        session_id=sid,
+        status=sess.status if sess else "idle",
+        tokens_in=sess.tokens_in if sess else 0,
+        tokens_out=sess.tokens_out if sess else 0,
+        events=events,
+        last_seq=last_seq,
+        running=agent.is_running(sid),
+    )
