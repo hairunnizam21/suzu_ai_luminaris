@@ -87,8 +87,8 @@ fun SessionsScreen(onOpenAsk: () -> Unit) {
             .onFailure { error = "Load failed: ${it.message}" }
     }
 
-    LaunchedEffect(url, token) {
-        if (url.isBlank() || token.isBlank()) return@LaunchedEffect
+    LaunchedEffect(url) {
+        if (url.isBlank()) return@LaunchedEffect
         loading = true
         refresh()
         loading = false

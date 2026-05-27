@@ -37,12 +37,12 @@ import kotlinx.coroutines.launch
 @Composable
 fun ClientRoot() {
     val app = ClientApp.instance
-    val (url, token) = app.store.pair.collectAsState(initial = "" to "").value
+    val (url, _token) = app.store.pair.collectAsState(initial = "" to "").value
 
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
-    val configured = url.isNotBlank() && token.isNotBlank()
+    val configured = url.isNotBlank()
     var tab by remember(configured) { mutableStateOf(if (configured) ClientTab.Sessions else ClientTab.Setup) }
 
     LaunchedEffect(configured) {

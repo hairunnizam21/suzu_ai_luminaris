@@ -75,11 +75,11 @@ fun AskScreen() {
     var error by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
 
-    LaunchedEffect(sessionId) {
+    LaunchedEffect(sessionId, url) {
         messages.clear()
         assistantBuffer = ""
         error = null
-        if (sessionId == null) return@LaunchedEffect
+        if (sessionId == null || url.isBlank()) return@LaunchedEffect
         runCatching { client.getMessages(sessionId) }
             .onSuccess { messages.addAll(it) }
             .onFailure { error = "Load failed: ${it.message}" }

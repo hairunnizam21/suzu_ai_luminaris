@@ -65,6 +65,21 @@ from .schemas import (
 from .ssh import SshError
 from .tools import apk as apk_tool
 
+
+async def require_ready() -> None:
+    """Client-facing gate: only blocks if the panel hasn't saved a config yet.
+
+    Once the panel writes a complete AdminConfig, every Client APK on the same
+    LAN that knows the URL can chat — by design. The admin endpoints stay
+    bearer-token-gated.
+    """
+    cfg = await db.get_config()
+    if not cfg.ai_provider.api_key or not cfg.ai_provider.model or not cfg.ssh.host:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "backend not configured — ask the Panel app operator to fill SSH + AI provider config first",
+        )
+
 VERSION = "0.1.0"
 
 db = Db()
@@ -97,8 +112,9 @@ async def health() -> HealthResponse:
     return HealthResponse(status="ok", version=VERSION)
 
 
-@app.get("/v1/ready", response_model=ReadyResponse, dependencies=[Depends(require_token)])
+@app.get("/v1/ready", response_model=ReadyResponse)
 async def ready() -> ReadyResponse:
+    """Public — clients only need to know if the panel finished configuring."""
     cfg = await db.get_config()
     missing: list[str] = []
     if not cfg.ssh.host:
@@ -233,18 +249,18 @@ async def import_backup(file: UploadFile = File(...)) -> dict[str, Any]:
 
 # -------- sessions ----------------------------------------------------
 
-@app.get("/v1/sessions", response_model=list[Session], dependencies=[Depends(require_token)])
+@app.get("/v1/sessions", response_model=list[Session], dependencies=[Depends(require_ready)])
 async def list_sessions() -> list[Session]:
     return await db.list_sessions()
 
 
-@app.post("/v1/sessions", response_model=Session, dependencies=[Depends(require_token)])
+@app.post("/v1/sessions", response_model=Session, dependencies=[Depends(require_ready)])
 async def create_session(payload: dict[str, Any]) -> Session:
     title = (payload.get("title") or "Untitled").strip() or "Untitled"
     return await db.create_session(title)
 
 
-@app.delete("/v1/sessions/{sid}", dependencies=[Depends(require_token)])
+@app.delete("/v1/sessions/{sid}", dependencies=[Depends(require_ready)])
 async def delete_session(sid: str) -> dict[str, str]:
     await db.delete_session(sid)
     return {"deleted": sid}
@@ -253,7 +269,7 @@ async def delete_session(sid: str) -> dict[str, str]:
 @app.get(
     "/v1/sessions/{sid}/messages",
     response_model=list[ChatMessage],
-    dependencies=[Depends(require_token)],
+    dependencies=[Depends(require_ready)],
 )
 async def list_messages(sid: str) -> list[ChatMessage]:
     return await db.list_messages(sid)
@@ -261,7 +277,7 @@ async def list_messages(sid: str) -> list[ChatMessage]:
 
 # -------- chat (SSE) --------------------------------------------------
 
-@app.post("/v1/chat", dependencies=[Depends(require_token)])
+@app.post("/v1/chat", dependencies=[Depends(require_ready)])
 async def chat(req: ChatRequest) -> StreamingResponse:
     cfg = await db.get_config()
     if not cfg.ai_provider.api_key or not cfg.ai_provider.model:

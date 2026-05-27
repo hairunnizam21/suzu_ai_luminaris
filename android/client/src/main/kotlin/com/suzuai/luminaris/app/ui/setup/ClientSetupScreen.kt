@@ -26,7 +26,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.suzuai.luminaris.app.ClientApp
 import com.suzuai.luminaris.shared.net.BackendClient
@@ -37,21 +36,17 @@ import com.suzuai.luminaris.shared.ui.StatusPill
 import kotlinx.coroutines.launch
 
 /**
- * Client first-run setup. Same URL/token contract as the panel — we explicitly
- * use the same endpoint so the panel and client can share a single backend.
- *
- * Once URL+token are saved the client polls /v1/ready. If the panel hasn't
- * filled config yet the client refuses to open Ask/Sessions and tells the
- * user "open the panel app first".
+ * Client first-run setup. Only asks for the backend URL — the operator's Panel
+ * app handles the bearer token. Once the panel has saved SSH + AI provider
+ * config, /v1/ready flips green and the client unlocks.
  */
 @Composable
 fun ClientSetupScreen(onSaved: () -> Unit) {
     val app = ClientApp.instance
     val scope = rememberCoroutineScope()
-    val (savedUrl, savedToken) = app.store.pair.collectAsState(initial = "" to "").value
+    val (savedUrl, _savedToken) = app.store.pair.collectAsState(initial = "" to "").value
 
     var url by remember(savedUrl) { mutableStateOf(savedUrl) }
-    var token by remember(savedToken) { mutableStateOf(savedToken) }
     var status by remember { mutableStateOf<String?>(null) }
     var ok by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
@@ -67,8 +62,8 @@ fun ClientSetupScreen(onSaved: () -> Unit) {
             Column {
                 SectionHeader("Connect to your Luminaris backend")
                 Text(
-                    "Use the same URL and token your Server Panel app uses. The client " +
-                        "stays disabled until the panel fills in SSH + AI provider config.",
+                    "Just paste the backend URL — your Panel app already holds the admin " +
+                        "token. The client unlocks the moment the panel finishes its setup.",
                     color = LuminarisColors.TextDim,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -84,24 +79,11 @@ fun ClientSetupScreen(onSaved: () -> Unit) {
                     modifier = Modifier.fillMaxWidth(),
                 )
 
-                Spacer(Modifier.height(10.dp))
-
-                OutlinedTextField(
-                    value = token,
-                    onValueChange = { token = it },
-                    label = { Text("Auth token") },
-                    placeholder = { Text("SUZU_TOKEN value") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    colors = clientFieldColors(),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-
                 Spacer(Modifier.height(14.dp))
 
                 Row {
                     Button(
-                        enabled = !busy && url.isNotBlank() && token.isNotBlank(),
+                        enabled = !busy && url.isNotBlank(),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = LuminarisColors.AccentCyan,
                             contentColor = androidx.compose.ui.graphics.Color.Black,
@@ -112,15 +94,15 @@ fun ClientSetupScreen(onSaved: () -> Unit) {
                             scope.launch {
                                 runCatching {
                                     val cleanUrl = url.trim().trimEnd('/')
-                                    val client = BackendClient(cleanUrl, token.trim())
+                                    val client = BackendClient(cleanUrl, "")
                                     val h = client.health()
                                     val r = client.ready()
-                                    app.store.set(cleanUrl, token.trim())
+                                    app.store.set(cleanUrl, "")
                                     ok = r.ready
                                     status = if (r.ready) {
-                                        "Connected — server v${h.version}, config ready."
+                                        "Connected — server v${h.version}, panel config ready."
                                     } else {
-                                        "Connected — but waiting on panel to fill: ${r.missing.joinToString()}"
+                                        "Connected — waiting for Panel app to finish setup: ${r.missing.joinToString()}"
                                     }
                                     onSaved()
                                 }.onFailure {
@@ -131,13 +113,13 @@ fun ClientSetupScreen(onSaved: () -> Unit) {
                             }
                         },
                     ) {
-                        Text(if (busy) "Connecting…" else "Save & verify", fontWeight = FontWeight.SemiBold)
+                        Text(if (busy) "Connecting…" else "Connect", fontWeight = FontWeight.SemiBold)
                     }
 
                     Spacer(Modifier.size(12.dp))
 
                     Button(
-                        enabled = !busy && (url.isNotBlank() || token.isNotBlank()),
+                        enabled = !busy && url.isNotBlank(),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = LuminarisColors.SurfaceAlt,
                             contentColor = LuminarisColors.Text,
@@ -145,7 +127,7 @@ fun ClientSetupScreen(onSaved: () -> Unit) {
                         onClick = {
                             scope.launch {
                                 app.store.clear()
-                                url = ""; token = ""
+                                url = ""
                                 status = "Cleared"
                                 ok = false
                             }
