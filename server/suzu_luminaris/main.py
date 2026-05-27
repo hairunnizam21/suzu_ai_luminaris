@@ -46,7 +46,12 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
-from . import agent, backup, providers
+import mimetypes
+import uuid
+from pathlib import Path
+import time
+
+from . import agent, backup, db_handle, providers
 from .auth import require_token
 from .config import settings
 from .db import Db
@@ -54,6 +59,7 @@ from .logbus import LogBus
 from .schemas import (
     AdminConfig,
     ApkArtifact,
+    Attachment,
     ChatMessage,
     ChatRequest,
     EventsResponse,
@@ -84,7 +90,9 @@ async def require_ready() -> None:
 VERSION = "0.1.0"
 
 db = Db()
+db_handle.register(db)
 logbus = LogBus(settings.log_file)
+settings.attachments_root.mkdir(parents=True, exist_ok=True)
 
 
 @asynccontextmanager
@@ -276,6 +284,82 @@ async def list_messages(sid: str) -> list[ChatMessage]:
     return await db.list_messages(sid)
 
 
+# -------- attachments -------------------------------------------------
+
+_MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024  # 50 MB per file is plenty for APK/log/image
+
+
+def _safe_name(name: str) -> str:
+    name = name.strip().replace("\\", "/").rsplit("/", 1)[-1] or "file"
+    out = "".join(c if (c.isalnum() or c in "._-") else "_" for c in name)
+    return out[:120] or "file"
+
+
+@app.post(
+    "/v1/sessions/{sid}/attachments",
+    response_model=Attachment,
+    dependencies=[Depends(require_ready)],
+)
+async def upload_attachment(
+    sid: str,
+    file: UploadFile = File(...),
+) -> Attachment:
+    sess = await db.get_session(sid)
+    if sess is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown session")
+    data = await file.read()
+    if len(data) > _MAX_ATTACHMENT_BYTES:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            f"file too large (max {_MAX_ATTACHMENT_BYTES} bytes)",
+        )
+    aid = uuid.uuid4().hex[:16]
+    name = _safe_name(file.filename or "file")
+    sess_dir: Path = settings.attachments_root / sid
+    sess_dir.mkdir(parents=True, exist_ok=True)
+    target = sess_dir / f"{aid}__{name}"
+    target.write_bytes(data)
+    mime = file.content_type or mimetypes.guess_type(name)[0] or "application/octet-stream"
+    att = Attachment(
+        id=aid,
+        session_id=sid,
+        name=name,
+        mime=mime,
+        size=len(data),
+        path=str(target),
+        created_at=time.time(),
+    )
+    await db.add_attachment(att)
+    await logbus.emit(
+        "INFO",
+        "attachments",
+        f"uploaded {name} ({len(data)}B, {mime}) to session {sid} as {aid}",
+    )
+    # Mask absolute path before returning to the client.
+    return att.model_copy(update={"path": ""})
+
+
+@app.get(
+    "/v1/sessions/{sid}/attachments",
+    response_model=list[Attachment],
+    dependencies=[Depends(require_ready)],
+)
+async def list_session_attachments(sid: str) -> list[Attachment]:
+    items = await db.list_attachments(sid)
+    return [a.model_copy(update={"path": ""}) for a in items]
+
+
+@app.get("/v1/attachments/{aid}", dependencies=[Depends(require_ready)])
+async def download_attachment(aid: str) -> FileResponse:
+    att = await db.get_attachment(aid)
+    if att is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown attachment")
+    p = Path(att.path)
+    if not p.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "attachment file missing on server")
+    return FileResponse(p, media_type=att.mime, filename=att.name)
+
+
 # -------- chat (background + event polling) ----------------------------
 
 @app.post("/v1/chat", dependencies=[Depends(require_ready)])
@@ -307,6 +391,7 @@ async def chat(req: ChatRequest) -> dict[str, Any]:
             session_id=req.session_id,
             user_message=req.content,
             max_iterations=req.max_iterations,
+            attachment_ids=req.attachment_ids,
         )
     except RuntimeError as e:
         raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e

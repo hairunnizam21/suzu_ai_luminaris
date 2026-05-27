@@ -100,6 +100,19 @@ class ChatRequest(BaseModel):
     session_id: str
     content: str
     max_iterations: int | None = None
+    attachment_ids: list[str] = []
+
+
+class Attachment(BaseModel):
+    """A file uploaded by the user that the agent can read with `read_attachment`."""
+
+    id: str
+    session_id: str
+    name: str
+    mime: str
+    size: int
+    path: str = ""  # server-local; not exposed in client list responses
+    created_at: float
 
 
 class TokenUsage(BaseModel):

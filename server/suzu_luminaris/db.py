@@ -23,6 +23,7 @@ import aiosqlite
 from .schemas import (
     AdminConfig,
     AgentEvent,
+    Attachment,
     ChatMessage,
     Session,
     TokenUsage,
@@ -74,6 +75,19 @@ class Db:
             );
             CREATE INDEX IF NOT EXISTS idx_events_session_seq
                 ON agent_events(session_id, seq);
+
+            CREATE TABLE IF NOT EXISTS attachments (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                mime TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                path TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_attachments_session
+                ON attachments(session_id);
             """
         )
         # Best-effort column additions for older DBs (no-op if already present).
@@ -310,6 +324,49 @@ class Db:
                 )
             )
         return out
+
+    # ----- attachments ----------------------------------------------
+
+    async def add_attachment(self, att: Attachment) -> None:
+        await self.conn.execute(
+            "INSERT INTO attachments(id, session_id, name, mime, size, path, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (att.id, att.session_id, att.name, att.mime, att.size, att.path, att.created_at),
+        )
+        await self.conn.commit()
+
+    async def get_attachment(self, aid: str) -> Attachment | None:
+        async with self.conn.execute(
+            "SELECT id, session_id, name, mime, size, path, created_at FROM attachments WHERE id = ?",
+            (aid,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        return Attachment(
+            id=row[0],
+            session_id=row[1],
+            name=row[2],
+            mime=row[3],
+            size=row[4],
+            path=row[5],
+            created_at=row[6],
+        )
+
+    async def list_attachments(self, sid: str) -> list[Attachment]:
+        async with self.conn.execute(
+            "SELECT id, session_id, name, mime, size, path, created_at FROM attachments"
+            " WHERE session_id = ? ORDER BY created_at DESC",
+            (sid,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [
+            Attachment(
+                id=r[0], session_id=r[1], name=r[2], mime=r[3],
+                size=r[4], path=r[5], created_at=r[6],
+            )
+            for r in rows
+        ]
 
     async def max_event_seq(self, sid: str) -> int:
         async with self.conn.execute(

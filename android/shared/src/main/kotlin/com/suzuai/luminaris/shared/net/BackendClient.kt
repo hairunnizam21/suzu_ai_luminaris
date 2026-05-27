@@ -2,6 +2,7 @@ package com.suzuai.luminaris.shared.net
 
 import com.suzuai.luminaris.shared.data.AdminConfig
 import com.suzuai.luminaris.shared.data.ApkArtifact
+import com.suzuai.luminaris.shared.data.Attachment
 import com.suzuai.luminaris.shared.data.ChatMessage
 import com.suzuai.luminaris.shared.data.ChatRequest
 import com.suzuai.luminaris.shared.data.EventsResponse
@@ -22,6 +23,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -130,6 +132,30 @@ class BackendClient(
         withContext(Dispatchers.IO) {
             get("/v1/sessions/$sessionId/events?since=$since&timeout=$timeoutSec")
         }
+
+    /** Upload an attachment (file/image/APK) for a chat session. */
+    suspend fun uploadAttachment(
+        sessionId: String,
+        bytes: ByteArray,
+        name: String,
+        mime: String,
+    ): Attachment = withContext(Dispatchers.IO) {
+        val body = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart(
+                "file",
+                name,
+                bytes.toRequestBody(mime.toMediaType()),
+            )
+            .build()
+        val request = req("/v1/sessions/$sessionId/attachments").post(body).build()
+        client.newCall(request).body<Attachment>()
+    }
+
+    /** List attachments uploaded for a session. */
+    suspend fun listAttachments(sessionId: String): List<Attachment> = withContext(Dispatchers.IO) {
+        get("/v1/sessions/$sessionId/attachments")
+    }
 
     /** Streaming chat for the client (legacy; superseded by startChat + pollEvents). */
     fun streamChat(request: ChatRequest): Flow<StreamEvent> = flow {

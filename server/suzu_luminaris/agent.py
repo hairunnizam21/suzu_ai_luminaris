@@ -88,6 +88,7 @@ async def start(
     session_id: str,
     user_message: str,
     max_iterations: int | None = None,
+    attachment_ids: list[str] | None = None,
 ) -> None:
     """Kick off the agent loop in a background task. Returns immediately.
 
@@ -96,7 +97,7 @@ async def start(
     if is_running(session_id):
         raise RuntimeError("session already running")
     task = asyncio.create_task(
-        _run(db, cfg, logbus, session_id, user_message, max_iterations)
+        _run(db, cfg, logbus, session_id, user_message, max_iterations, attachment_ids or [])
     )
     _running[session_id] = task
 
@@ -108,14 +109,33 @@ async def _run(
     session_id: str,
     user_message: str,
     max_iterations: int | None,
+    attachment_ids: list[str],
 ) -> None:
     cap = max_iterations or cfg.max_iterations
     try:
         await db.set_session_status(session_id, "typing")
         await _emit(db, session_id, "status", status="typing")
 
+        # If the user attached files, append a manifest to the message so the
+        # assistant knows which attachments are available (and their ids).
+        manifest = ""
+        if attachment_ids:
+            lines: list[str] = []
+            for aid in attachment_ids:
+                att = await db.get_attachment(aid)
+                if att is None or att.session_id != session_id:
+                    continue
+                lines.append(f"- id={att.id}  name={att.name}  mime={att.mime}  size={att.size}B")
+            if lines:
+                manifest = (
+                    "\n\n[attachments]\n"
+                    + "\n".join(lines)
+                    + "\nUse the `read_attachment` tool with the id to read them."
+                )
+        full_user = user_message + manifest
+
         # Persist the user turn first so resume-reload sees it.
-        await db.append_message(session_id, ChatMessage(role="user", content=user_message))
+        await db.append_message(session_id, ChatMessage(role="user", content=full_user))
 
         history: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
         prior = await db.list_messages(session_id)

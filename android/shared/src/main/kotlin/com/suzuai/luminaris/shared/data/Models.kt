@@ -119,6 +119,19 @@ data class ChatRequest(
     @SerialName("session_id") val sessionId: String,
     val content: String,
     @SerialName("max_iterations") val maxIterations: Int? = null,
+    @SerialName("attachment_ids") val attachmentIds: List<String> = emptyList(),
+)
+
+/** A file the user uploaded into a chat session for agent analysis. */
+@Serializable
+data class Attachment(
+    val id: String,
+    @SerialName("session_id") val sessionId: String,
+    val name: String,
+    val mime: String,
+    val size: Long,
+    val path: String = "",
+    @SerialName("created_at") val createdAt: Double,
 )
 
 /** SSE event envelope. `type` decides which other fields are populated. */
