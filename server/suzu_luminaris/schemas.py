@@ -96,3 +96,17 @@ class ChatRequest(BaseModel):
     session_id: str
     content: str
     max_iterations: int | None = None
+
+
+class StreamEvent(BaseModel):
+    """Mirror of the wire SSE shape. Server emits these as `data: <json>` frames.
+
+    type ∈ {delta, tool_call, tool_result, done, error}. Only the field for
+    the current type is populated; clients ignore the rest.
+    """
+
+    type: str
+    delta: str | None = None
+    tool_call: ToolCall | None = None
+    tool_result: ToolResult | None = None
+    message: str | None = None

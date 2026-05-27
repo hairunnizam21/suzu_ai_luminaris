@@ -21,7 +21,7 @@ from typing import Any
 from . import providers, tools
 from .db import Db
 from .logbus import LogBus
-from .schemas import AdminConfig, ChatMessage, StreamEvent, ToolCall, ToolResult
+from .schemas import AdminConfig, ChatMessage, ToolCall, ToolResult  # StreamEvent imported by main
 
 SYSTEM_PROMPT = """You are SuzuAI Luminaris — a Devin-style coding agent paired with an Android app.
 
