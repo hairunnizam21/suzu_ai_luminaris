@@ -132,6 +132,7 @@ fun AskScreen() {
         tokensIn = 0
         tokensOut = 0
         agentStatus = "idle"
+        sending = false
         if (sessionId == null || url.isBlank()) return@LaunchedEffect
         runCatching { client.getMessages(sessionId) }
             .onSuccess { messages.addAll(it) }
@@ -143,7 +144,13 @@ fun AskScreen() {
                 agentStatus = it.status
                 tokensIn = it.tokensIn
                 tokensOut = it.tokensOut
-                if (it.running) polling = true
+                if (it.running) {
+                    polling = true
+                    // Mirror server-side state so the Send button stays
+                    // disabled when we re-open the app mid-turn. Otherwise
+                    // the user can tap Send and hit HTTP 409.
+                    sending = true
+                }
             }
     }
 
@@ -166,6 +173,12 @@ fun AskScreen() {
                 AgentState.status = resp.status
                 AgentState.tokensIn = resp.tokensIn
                 AgentState.tokensOut = resp.tokensOut
+                // Keep `sending` synced with the server-truth `running`
+                // flag so the Send button reflects reality even if the
+                // backend started/finished a turn from another client.
+                if (resp.running && !sending) {
+                    sending = true
+                }
                 for (ev in resp.events) {
                     applyEvent(ev, messages,
                         appendDelta = { assistantBuffer += it },
@@ -272,7 +285,18 @@ fun AskScreen() {
             }
         }
 
-        if (agentStatus == "error" && !sending) {
+        // The composer is "busy" whenever the agent task is in-flight or
+        // about to be — we treat the local `sending` flag, an active poll
+        // loop, and any non-idle server status as equivalent for the
+        // purposes of locking the Send button. This is what prevents the
+        // HTTP 409 "session already has a running agent" race after the
+        // app is backgrounded and re-opened mid-turn.
+        val isBusy = sending ||
+            polling ||
+            agentStatus == "typing" ||
+            agentStatus == "tool"
+
+        if (agentStatus == "error" && !isBusy) {
             ResumeBar(
                 onResume = {
                     error = null
@@ -293,14 +317,14 @@ fun AskScreen() {
         Composer(
             value = input,
             onChange = { input = it },
-            sending = sending,
+            sending = isBusy,
             attachments = pendingAttachments,
             uploading = uploading,
             onPick = { pickFile.launch("*/*") },
             onRemoveAttachment = { pendingAttachments.remove(it) },
             onSend = {
                 val text = input.trim()
-                if ((text.isEmpty() && pendingAttachments.isEmpty()) || sending) return@Composer
+                if ((text.isEmpty() && pendingAttachments.isEmpty()) || isBusy) return@Composer
                 val attIds = pendingAttachments.map { it.id }
                 val attNames = pendingAttachments.joinToString(", ") { it.name }
                 val displayText = if (text.isNotEmpty()) text else "(attached: $attNames)"
