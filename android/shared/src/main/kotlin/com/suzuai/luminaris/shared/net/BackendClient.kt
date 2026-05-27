@@ -139,6 +139,19 @@ class BackendClient(
             get("/v1/sessions/$sessionId/events?since=$since&timeout=$timeoutSec")
         }
 
+    /** Resume an errored session without sending a new user message — the
+     *  agent picks up from the existing history. Used after a transient
+     *  upstream provider failure. */
+    suspend fun resumeSession(sessionId: String) = withContext(Dispatchers.IO) {
+        val empty = "".toRequestBody(JSON)
+        val resp = client.newCall(req("/v1/sessions/$sessionId/resume").post(empty).build()).execute()
+        resp.use {
+            if (!it.isSuccessful) {
+                throw BackendException(it.code, it.body?.string().orEmpty())
+            }
+        }
+    }
+
     /** Upload an attachment (file/image/APK) for a chat session. */
     suspend fun uploadAttachment(
         sessionId: String,

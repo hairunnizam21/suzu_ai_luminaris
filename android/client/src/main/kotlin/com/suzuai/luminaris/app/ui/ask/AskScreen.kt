@@ -272,6 +272,24 @@ fun AskScreen() {
             }
         }
 
+        if (agentStatus == "error" && !sending) {
+            ResumeBar(
+                onResume = {
+                    error = null
+                    sending = true
+                    scope.launch {
+                        runCatching {
+                            client.resumeSession(sessionId)
+                            polling = true
+                        }.onFailure {
+                            error = "Resume failed: ${it.message}"
+                            sending = false
+                        }
+                    }
+                },
+            )
+        }
+
         Composer(
             value = input,
             onChange = { input = it },
@@ -753,4 +771,62 @@ private fun attachmentIcon(mime: String) = when {
     mime.startsWith("image/") -> Icons.Outlined.Description
     mime.contains("android") || mime.contains("zip") -> Icons.Outlined.PhoneAndroid
     else -> Icons.Outlined.AttachFile
+}
+
+@Composable
+private fun ResumeBar(onResume: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(LuminarisColors.AccentRed.copy(alpha = 0.08f))
+            .border(
+                width = 1.dp,
+                color = LuminarisColors.AccentRed.copy(alpha = 0.35f),
+            )
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Outlined.Build,
+            contentDescription = null,
+            tint = LuminarisColors.AccentRed,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                "Upstream error",
+                color = LuminarisColors.AccentRed,
+                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+            )
+            Text(
+                "Agent stopped mid-turn. Tap Resume to continue from where it left off — no context lost.",
+                color = LuminarisColors.TextDim,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(16.dp))
+                .background(LuminarisColors.AccentCyan.copy(alpha = 0.15f))
+                .border(1.dp, LuminarisColors.AccentCyan, RoundedCornerShape(16.dp))
+                .clickable { onResume() }
+                .padding(horizontal = 14.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.AutoMirrored.Outlined.Send,
+                contentDescription = null,
+                tint = LuminarisColors.AccentCyan,
+                modifier = Modifier.size(14.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "Resume",
+                color = LuminarisColors.AccentCyan,
+                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+            )
+        }
+    }
 }

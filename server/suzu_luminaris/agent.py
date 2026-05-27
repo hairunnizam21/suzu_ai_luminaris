@@ -44,6 +44,32 @@ HISTORY_HEAD_KEEP = 2  # always keep first N non-system turns
 HISTORY_TAIL_KEEP = 30  # keep most recent N items
 HISTORY_TOTAL_LIMIT = 60  # rough cap; trim to head+tail when above
 
+# Auto-retry policy for transient upstream errors (e.g. HTTP 504 / 502 / 503 /
+# connection reset). We only retry BEFORE we have produced any output for the
+# current turn — once tokens have started streaming we cannot safely retry
+# without duplicating user-visible content.
+PROVIDER_MAX_RETRIES = 3
+PROVIDER_BACKOFF_BASE = 2.0  # seconds; doubles each attempt
+_RETRYABLE_HTTP_CODES = ("502", "503", "504", "520", "522", "524")
+_RETRYABLE_SUBSTRINGS = (
+    "upstream_timeout",
+    "upstream request timed out",
+    "gateway timeout",
+    "read timeout",
+    "connection reset",
+    "connection aborted",
+    "temporarily unavailable",
+    "service unavailable",
+    "bad gateway",
+)
+
+
+def _is_retryable(e: Exception) -> bool:
+    msg = str(e).lower()
+    if any(code in msg for code in _RETRYABLE_HTTP_CODES):
+        return True
+    return any(s in msg for s in _RETRYABLE_SUBSTRINGS)
+
 
 class _Bus:
     """Per-session async fan-out for long-poll waiters.
@@ -89,15 +115,29 @@ async def start(
     user_message: str,
     max_iterations: int | None = None,
     attachment_ids: list[str] | None = None,
+    resume: bool = False,
 ) -> None:
     """Kick off the agent loop in a background task. Returns immediately.
+
+    If `resume=True`, skip appending the user message and continue from the
+    existing history — used to recover from a transient provider error
+    without losing context.
 
     Raises RuntimeError if a task is already running for this session.
     """
     if is_running(session_id):
         raise RuntimeError("session already running")
     task = asyncio.create_task(
-        _run(db, cfg, logbus, session_id, user_message, max_iterations, attachment_ids or [])
+        _run(
+            db,
+            cfg,
+            logbus,
+            session_id,
+            user_message,
+            max_iterations,
+            attachment_ids or [],
+            resume,
+        )
     )
     _running[session_id] = task
 
@@ -110,32 +150,35 @@ async def _run(
     user_message: str,
     max_iterations: int | None,
     attachment_ids: list[str],
+    resume: bool = False,
 ) -> None:
     cap = max_iterations or cfg.max_iterations
     try:
         await db.set_session_status(session_id, "typing")
         await _emit(db, session_id, "status", status="typing")
 
-        # If the user attached files, append a manifest to the message so the
-        # assistant knows which attachments are available (and their ids).
-        manifest = ""
-        if attachment_ids:
-            lines: list[str] = []
-            for aid in attachment_ids:
-                att = await db.get_attachment(aid)
-                if att is None or att.session_id != session_id:
-                    continue
-                lines.append(f"- id={att.id}  name={att.name}  mime={att.mime}  size={att.size}B")
-            if lines:
-                manifest = (
-                    "\n\n[attachments]\n"
-                    + "\n".join(lines)
-                    + "\nUse the `read_attachment` tool with the id to read them."
-                )
-        full_user = user_message + manifest
-
-        # Persist the user turn first so resume-reload sees it.
-        await db.append_message(session_id, ChatMessage(role="user", content=full_user))
+        if not resume:
+            # If the user attached files, append a manifest to the message so the
+            # assistant knows which attachments are available (and their ids).
+            manifest = ""
+            if attachment_ids:
+                lines: list[str] = []
+                for aid in attachment_ids:
+                    att = await db.get_attachment(aid)
+                    if att is None or att.session_id != session_id:
+                        continue
+                    lines.append(f"- id={att.id}  name={att.name}  mime={att.mime}  size={att.size}B")
+                if lines:
+                    manifest = (
+                        "\n\n[attachments]\n"
+                        + "\n".join(lines)
+                        + "\nUse the `read_attachment` tool with the id to read them."
+                    )
+            full_user = user_message + manifest
+            # Persist the user turn first so resume-reload sees it.
+            await db.append_message(session_id, ChatMessage(role="user", content=full_user))
+        else:
+            await logbus.emit("INFO", "agent.resume", f"resuming session {session_id}")
 
         history: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
         prior = await db.list_messages(session_id)
@@ -149,43 +192,84 @@ async def _run(
             history = _compact_history(history)
             assistant_text = ""
             pending: list[dict[str, Any]] = []
-            try:
-                async for chunk in providers.stream(cfg.ai_provider, history, schema):
-                    t = chunk.get("type")
-                    if t == "delta":
-                        text = chunk.get("text", "")
-                        assistant_text += text
-                        await _emit(db, session_id, "delta", delta=text)
-                    elif t == "tool_call":
-                        pending.append(chunk)
+            stream_err: providers.ProviderError | None = None
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    async for chunk in providers.stream(cfg.ai_provider, history, schema):
+                        t = chunk.get("type")
+                        if t == "delta":
+                            text = chunk.get("text", "")
+                            assistant_text += text
+                            await _emit(db, session_id, "delta", delta=text)
+                        elif t == "tool_call":
+                            pending.append(chunk)
+                            await _emit(
+                                db,
+                                session_id,
+                                "tool_call",
+                                tool_call=ToolCall(
+                                    id=chunk.get("id", ""),
+                                    name=chunk.get("name", ""),
+                                    args=chunk.get("args", ""),
+                                ),
+                            )
+                        elif t == "usage":
+                            prompt = int(chunk.get("prompt", 0))
+                            completion = int(chunk.get("completion", 0))
+                            total = int(chunk.get("total", 0)) or (prompt + completion)
+                            await db.add_session_tokens(session_id, prompt, completion)
+                            await _emit(
+                                db,
+                                session_id,
+                                "usage",
+                                usage=TokenUsage(
+                                    prompt=prompt, completion=completion, total=total
+                                ),
+                            )
+                        elif t == "stop":
+                            break
+                    stream_err = None
+                    break  # stream finished cleanly
+                except providers.ProviderError as e:
+                    stream_err = e
+                    # Retry only on transient upstream issues AND only if
+                    # we haven't started producing output for this turn yet
+                    # (otherwise we'd duplicate deltas/tool_calls already
+                    # emitted to the client).
+                    retryable = _is_retryable(e) and not assistant_text and not pending
+                    if retryable and attempt <= PROVIDER_MAX_RETRIES:
+                        backoff = PROVIDER_BACKOFF_BASE * (2 ** (attempt - 1))
+                        await logbus.emit(
+                            "WARN",
+                            "agent.provider",
+                            f"transient error (attempt {attempt}/{PROVIDER_MAX_RETRIES}): {e} — retrying in {backoff:.1f}s",
+                        )
+                        # Re-emit "typing" so the client UI sees activity; the
+                        # `message` field carries the retry note so it can be
+                        # surfaced if desired.
                         await _emit(
                             db,
                             session_id,
-                            "tool_call",
-                            tool_call=ToolCall(
-                                id=chunk.get("id", ""),
-                                name=chunk.get("name", ""),
-                                args=chunk.get("args", ""),
-                            ),
+                            "status",
+                            status="typing",
+                            message=f"retry {attempt}/{PROVIDER_MAX_RETRIES} after {backoff:.0f}s",
                         )
-                    elif t == "usage":
-                        prompt = int(chunk.get("prompt", 0))
-                        completion = int(chunk.get("completion", 0))
-                        total = int(chunk.get("total", 0)) or (prompt + completion)
-                        await db.add_session_tokens(session_id, prompt, completion)
-                        await _emit(
-                            db,
-                            session_id,
-                            "usage",
-                            usage=TokenUsage(
-                                prompt=prompt, completion=completion, total=total
-                            ),
-                        )
-                    elif t == "stop":
-                        break
-            except providers.ProviderError as e:
-                await logbus.emit("ERROR", "agent.provider", str(e))
-                await _emit(db, session_id, "error", message=str(e))
+                        await asyncio.sleep(backoff)
+                        continue
+                    break  # give up, fall through to error handling
+
+            if stream_err is not None:
+                # Save any partial assistant text we DID receive before the
+                # error so a Resume picks up from there.
+                if assistant_text:
+                    await db.append_message(
+                        session_id,
+                        ChatMessage(role="assistant", content=assistant_text),
+                    )
+                await logbus.emit("ERROR", "agent.provider", str(stream_err))
+                await _emit(db, session_id, "error", message=str(stream_err))
                 await db.set_session_status(session_id, "error")
                 await _emit(db, session_id, "status", status="error")
                 return

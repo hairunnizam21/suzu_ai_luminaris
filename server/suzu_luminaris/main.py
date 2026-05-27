@@ -398,6 +398,39 @@ async def chat(req: ChatRequest) -> dict[str, Any]:
     return {"started": True, "session_id": req.session_id}
 
 
+@app.post("/v1/sessions/{sid}/resume", dependencies=[Depends(require_ready)])
+async def resume_session(sid: str) -> dict[str, Any]:
+    """Resume an errored session — continue the agent loop from the existing
+    history without appending a new user turn. Used by the client's "Resume"
+    button after a transient upstream provider failure.
+    """
+    cfg = await db.get_config()
+    if not cfg.ai_provider.api_key or not cfg.ai_provider.model:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "ai provider not configured")
+    if not cfg.ssh.host:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "ssh not configured")
+    if agent.is_running(sid):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "session already has a running agent",
+        )
+    sess = await db.get_session(sid)
+    if sess is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown session")
+    try:
+        await agent.start(
+            db=db,
+            cfg=cfg,
+            logbus=logbus,
+            session_id=sid,
+            user_message="",
+            resume=True,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
+    return {"resumed": True, "session_id": sid}
+
+
 @app.get(
     "/v1/sessions/{sid}/events",
     response_model=EventsResponse,
