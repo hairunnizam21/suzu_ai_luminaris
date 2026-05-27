@@ -122,8 +122,14 @@ class BackendClient(
     /** Kick off chat as a server-side background task. Returns immediately;
      *  the agent keeps running even if the client disconnects. Subsequent
      *  updates flow through [pollEvents]. */
-    suspend fun startChat(request: ChatRequest): Map<String, Boolean> = withContext(Dispatchers.IO) {
-        post("/v1/chat", request)
+    suspend fun startChat(request: ChatRequest) = withContext(Dispatchers.IO) {
+        val body = json.encodeToString(request).toRequestBody(JSON)
+        val resp = client.newCall(req("/v1/chat").post(body).build()).execute()
+        resp.use {
+            if (!it.isSuccessful) {
+                throw BackendException(it.code, it.body?.string().orEmpty())
+            }
+        }
     }
 
     /** Long-poll for new agent events. `since` is the last seen seq; the
