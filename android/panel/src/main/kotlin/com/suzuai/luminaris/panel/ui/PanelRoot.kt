@@ -107,7 +107,9 @@ fun PanelRoot() {
                     PanelDest.Setup -> SetupScreen(
                         onSaved = { current = PanelDest.Config },
                     )
-                    PanelDest.Config -> ConfigScreen()
+                    PanelDest.Config -> ConfigScreen(
+                        onTokenError = { current = PanelDest.Setup },
+                    )
                     PanelDest.Logs -> LogsScreen()
                     PanelDest.Apks -> ApksScreen()
                     PanelDest.Backup -> BackupScreen()

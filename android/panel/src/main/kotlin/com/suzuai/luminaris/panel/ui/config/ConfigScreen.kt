@@ -36,6 +36,7 @@ import com.suzuai.luminaris.shared.data.AiProviderConfig
 import com.suzuai.luminaris.shared.data.SshConfig
 import com.suzuai.luminaris.shared.data.VerifyResponse
 import com.suzuai.luminaris.shared.net.BackendClient
+import com.suzuai.luminaris.shared.net.BackendException
 import com.suzuai.luminaris.shared.theme.LuminarisColors
 import com.suzuai.luminaris.shared.ui.LuminarisCard
 import com.suzuai.luminaris.shared.ui.SectionHeader
@@ -48,7 +49,7 @@ import kotlinx.coroutines.launch
  * per-row OK/fail status.
  */
 @Composable
-fun ConfigScreen() {
+fun ConfigScreen(onTokenError: (() -> Unit)? = null) {
     val app = PanelApp.instance
     val scope = rememberCoroutineScope()
     val (url, token) = app.store.pair.collectAsState(initial = "" to "").value
@@ -57,14 +58,19 @@ fun ConfigScreen() {
     var config by remember { mutableStateOf(AdminConfig()) }
     var verify by remember { mutableStateOf<VerifyResponse?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var isAuthError by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var loaded by remember { mutableStateOf(false) }
 
     LaunchedEffect(url, token) {
         if (url.isBlank() || token.isBlank()) return@LaunchedEffect
+        isAuthError = false
         runCatching { client.getConfig() }
             .onSuccess { config = it; loaded = true }
-            .onFailure { error = "Load failed: ${it.message}" }
+            .onFailure {
+                error = "Load failed: ${it.message}"
+                if (it is BackendException && it.httpCode == 401) isAuthError = true
+            }
     }
 
     Column(
@@ -139,6 +145,16 @@ fun ConfigScreen() {
                 if (error != null) {
                     Spacer(Modifier.height(10.dp))
                     StatusPill(ok = false, label = error!!)
+                    if (isAuthError && onTokenError != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Button(
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = LuminarisColors.AccentRed,
+                                contentColor = androidx.compose.ui.graphics.Color.White,
+                            ),
+                            onClick = onTokenError,
+                        ) { Text("Re-enter token", fontWeight = FontWeight.SemiBold) }
+                    }
                 }
 
                 verify?.let { v ->

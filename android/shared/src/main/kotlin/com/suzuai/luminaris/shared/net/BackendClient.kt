@@ -21,6 +21,8 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -226,4 +228,17 @@ class BackendClient(
 }
 
 class BackendException(val httpCode: Int, val responseBody: String) :
-    IOException("HTTP $httpCode: ${responseBody.take(300)}")
+    IOException("HTTP $httpCode: ${parseErrorBody(responseBody)}")
+
+private fun parseErrorBody(body: String): String {
+    return try {
+        val obj = Json.parseToJsonElement(body).jsonObject
+        obj["detail"]?.jsonPrimitive?.content
+            ?: obj["error"]?.let { err ->
+                err.jsonObject["message"]?.jsonPrimitive?.content
+            }
+            ?: body.take(300)
+    } catch (_: Exception) {
+        body.take(300)
+    }
+}
