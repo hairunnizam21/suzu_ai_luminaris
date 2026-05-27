@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 from typing import Any
 
 from . import providers, tools
@@ -48,8 +49,18 @@ HISTORY_TOTAL_LIMIT = 60  # rough cap; trim to head+tail when above
 # connection reset). We only retry BEFORE we have produced any output for the
 # current turn — once tokens have started streaming we cannot safely retry
 # without duplicating user-visible content.
-PROVIDER_MAX_RETRIES = 3
+#
+# Schedule (with 0–25% jitter added per attempt, capped at PROVIDER_BACKOFF_MAX):
+#   attempt 1 fails → wait ~2s   → retry
+#   attempt 2 fails → wait ~4s   → retry
+#   attempt 3 fails → wait ~8s   → retry
+#   attempt 4 fails → wait ~16s  → retry
+#   attempt 5 fails → wait ~30s  → retry
+#   attempt 6 fails → give up, surface error to client (Resume bar)
+PROVIDER_MAX_RETRIES = 5
 PROVIDER_BACKOFF_BASE = 2.0  # seconds; doubles each attempt
+PROVIDER_BACKOFF_MAX = 30.0  # cap so we don't wait absurdly long
+PROVIDER_BACKOFF_JITTER = 0.25  # add 0–25% jitter to avoid thundering herd
 _RETRYABLE_HTTP_CODES = ("502", "503", "504", "520", "522", "524")
 _RETRYABLE_SUBSTRINGS = (
     "upstream_timeout",
@@ -61,6 +72,7 @@ _RETRYABLE_SUBSTRINGS = (
     "temporarily unavailable",
     "service unavailable",
     "bad gateway",
+    "idle timeout",
 )
 
 
@@ -69,6 +81,19 @@ def _is_retryable(e: Exception) -> bool:
     if any(code in msg for code in _RETRYABLE_HTTP_CODES):
         return True
     return any(s in msg for s in _RETRYABLE_SUBSTRINGS)
+
+
+def _retry_backoff(attempt: int) -> float:
+    """Exponential backoff with jitter and a hard cap.
+
+    `attempt` is 1-based — the wait *after* attempt N fails before attempt N+1.
+    """
+    base = min(
+        PROVIDER_BACKOFF_BASE * (2 ** (attempt - 1)),
+        PROVIDER_BACKOFF_MAX,
+    )
+    jitter = base * PROVIDER_BACKOFF_JITTER * random.random()
+    return base + jitter
 
 
 class _Bus:
@@ -240,7 +265,7 @@ async def _run(
                     # emitted to the client).
                     retryable = _is_retryable(e) and not assistant_text and not pending
                     if retryable and attempt <= PROVIDER_MAX_RETRIES:
-                        backoff = PROVIDER_BACKOFF_BASE * (2 ** (attempt - 1))
+                        backoff = _retry_backoff(attempt)
                         await logbus.emit(
                             "WARN",
                             "agent.provider",
@@ -268,8 +293,18 @@ async def _run(
                         session_id,
                         ChatMessage(role="assistant", content=assistant_text),
                     )
-                await logbus.emit("ERROR", "agent.provider", str(stream_err))
-                await _emit(db, session_id, "error", message=str(stream_err))
+                # Surface attempt count to the client so they know we already
+                # tried hard before giving up. Retryable errors get a Resume
+                # hint appended; non-retryable ones are reported verbatim.
+                if _is_retryable(stream_err) and attempt > 1:
+                    msg = (
+                        f"{stream_err} (gave up after {attempt} attempts — "
+                        f"tap Resume to continue)"
+                    )
+                else:
+                    msg = str(stream_err)
+                await logbus.emit("ERROR", "agent.provider", msg)
+                await _emit(db, session_id, "error", message=msg)
                 await db.set_session_status(session_id, "error")
                 await _emit(db, session_id, "status", status="error")
                 return
