@@ -101,6 +101,12 @@ class Db:
             except aiosqlite.OperationalError:
                 pass
         await self._conn.commit()
+        # On boot, reset any sessions stuck in non-idle status (e.g. "typing")
+        # because in-memory agent tasks are lost on process restart.
+        await self._conn.execute(
+            "UPDATE sessions SET status = 'error' WHERE status NOT IN ('idle', 'error', 'done')"
+        )
+        await self._conn.commit()
 
     async def close(self) -> None:
         if self._conn is not None:

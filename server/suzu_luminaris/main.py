@@ -398,6 +398,16 @@ async def chat(req: ChatRequest) -> dict[str, Any]:
     return {"started": True, "session_id": req.session_id}
 
 
+@app.post("/v1/sessions/{sid}/stop", dependencies=[Depends(require_ready)])
+async def stop_session(sid: str) -> dict[str, Any]:
+    """Cancel a running agent task so the user can send a new message."""
+    sess = await db.get_session(sid)
+    if sess is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown session")
+    stopped = await agent.stop(db, logbus, sid)
+    return {"stopped": stopped, "session_id": sid}
+
+
 @app.post("/v1/sessions/{sid}/resume", dependencies=[Depends(require_ready)])
 async def resume_session(sid: str) -> dict[str, Any]:
     """Resume an errored session — continue the agent loop from the existing

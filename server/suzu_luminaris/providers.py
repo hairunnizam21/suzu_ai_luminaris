@@ -32,6 +32,28 @@ class ProviderError(RuntimeError):
     pass
 
 
+def _format_error(status_code: int, body: bytes) -> str:
+    """Extract a human-readable message from a provider error response."""
+    text = body[:400].decode("utf-8", "replace")
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            # OpenAI / fiqstr / OpenRouter: {"error":{"message":"..."}}
+            err = obj.get("error")
+            if isinstance(err, dict):
+                msg = err.get("message") or err.get("msg") or ""
+                if msg:
+                    return f"HTTP {status_code}: {msg}"
+            # Anthropic: {"error":{"type":"...","message":"..."}}
+            # Simple {"detail":"..."} or {"message":"..."}
+            for key in ("detail", "message"):
+                if key in obj and isinstance(obj[key], str):
+                    return f"HTTP {status_code}: {obj[key]}"
+    except (json.JSONDecodeError, KeyError, TypeError):
+        pass
+    return f"HTTP {status_code}: {text}"
+
+
 async def _iter_lines_with_idle_timeout(
     resp: httpx.Response, idle_timeout: float
 ) -> AsyncIterator[str]:
@@ -80,7 +102,7 @@ async def verify(cfg: AiProviderConfig) -> str:
                 },
             )
     if r.status_code >= 400:
-        raise ProviderError(f"HTTP {r.status_code}: {r.text[:300]}")
+        raise ProviderError(_format_error(r.status_code, r.content))
     return f"OK ({r.status_code})"
 
 
@@ -135,7 +157,7 @@ async def _stream_openai(
         ) as resp:
             if resp.status_code >= 400:
                 body = await resp.aread()
-                raise ProviderError(f"HTTP {resp.status_code}: {body[:400].decode('utf-8', 'replace')}")
+                raise ProviderError(_format_error(resp.status_code, body))
             # Accumulate tool call args across deltas keyed by index.
             tool_accum: dict[int, dict[str, str]] = {}
             async for line in _iter_lines_with_idle_timeout(resp, _STREAM_IDLE_TIMEOUT_S):
@@ -231,7 +253,7 @@ async def _stream_anthropic(
         ) as resp:
             if resp.status_code >= 400:
                 body = await resp.aread()
-                raise ProviderError(f"HTTP {resp.status_code}: {body[:400].decode('utf-8', 'replace')}")
+                raise ProviderError(_format_error(resp.status_code, body))
             tool_accum: dict[int, dict[str, str]] = {}
             async for line in _iter_lines_with_idle_timeout(resp, _STREAM_IDLE_TIMEOUT_S):
                 if not line or not line.startswith("data:"):

@@ -59,7 +59,7 @@ HISTORY_TOTAL_LIMIT = 60  # rough cap; trim to head+tail when above
 #   attempt 6 fails → give up, surface error to client (Resume bar)
 PROVIDER_MAX_RETRIES = 5
 PROVIDER_BACKOFF_BASE = 2.0  # seconds; doubles each attempt
-PROVIDER_BACKOFF_MAX = 30.0  # cap so we don't wait absurdly long
+PROVIDER_BACKOFF_MAX = 15.0  # cap so we don't wait absurdly long
 PROVIDER_BACKOFF_JITTER = 0.25  # add 0–25% jitter to avoid thundering herd
 _RETRYABLE_HTTP_CODES = ("502", "503", "504", "520", "522", "524")
 _RETRYABLE_SUBSTRINGS = (
@@ -130,6 +130,22 @@ _running: dict[str, asyncio.Task[None]] = {}
 def is_running(sid: str) -> bool:
     t = _running.get(sid)
     return t is not None and not t.done()
+
+
+async def stop(db: Db, logbus: LogBus, sid: str) -> bool:
+    """Cancel a running agent task and reset the session to 'idle'."""
+    t = _running.pop(sid, None)
+    if t is None or t.done():
+        return False
+    t.cancel()
+    try:
+        await t
+    except (asyncio.CancelledError, Exception):
+        pass
+    await db.set_session_status(sid, "idle")
+    await _emit(db, sid, "status", status="idle")
+    await logbus.emit("INFO", "agent.stop", f"agent stopped for {sid}")
+    return True
 
 
 async def start(

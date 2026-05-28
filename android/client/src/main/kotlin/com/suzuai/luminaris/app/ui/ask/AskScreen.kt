@@ -296,6 +296,23 @@ fun AskScreen() {
             agentStatus == "typing" ||
             agentStatus == "tool"
 
+        if (isBusy) {
+            StopBar(
+                onStop = {
+                    scope.launch {
+                        runCatching { client.stopSession(sessionId) }
+                            .onSuccess {
+                                polling = false
+                                sending = false
+                                agentStatus = "idle"
+                                AgentState.status = "idle"
+                            }
+                            .onFailure { error = "Stop failed: ${it.message}" }
+                    }
+                },
+            )
+        }
+
         if (agentStatus == "error" && !isBusy) {
             ResumeBar(
                 onResume = {
@@ -795,6 +812,50 @@ private fun attachmentIcon(mime: String) = when {
     mime.startsWith("image/") -> Icons.Outlined.Description
     mime.contains("android") || mime.contains("zip") -> Icons.Outlined.PhoneAndroid
     else -> Icons.Outlined.AttachFile
+}
+
+@Composable
+private fun StopBar(onStop: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(LuminarisColors.AccentCyan.copy(alpha = 0.06f))
+            .border(
+                width = 1.dp,
+                color = LuminarisColors.AccentCyan.copy(alpha = 0.25f),
+            )
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "Agent running…",
+            color = LuminarisColors.TextDim,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.weight(1f),
+        )
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(16.dp))
+                .background(LuminarisColors.AccentRed.copy(alpha = 0.15f))
+                .border(1.dp, LuminarisColors.AccentRed, RoundedCornerShape(16.dp))
+                .clickable { onStop() }
+                .padding(horizontal = 14.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Outlined.Close,
+                contentDescription = null,
+                tint = LuminarisColors.AccentRed,
+                modifier = Modifier.size(14.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "Stop",
+                color = LuminarisColors.AccentRed,
+                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+            )
+        }
+    }
 }
 
 @Composable
